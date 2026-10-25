@@ -1,0 +1,21 @@
+END-USER LICENSE AGREEMENT (EULA) FOR PICTURE PERFECT
+
+IMPORTANT — READ CAREFULLY: This End-User License Agreement ("EULA") is a legal agreement between you (either an individual or a single entity) and Picture Perfect ("Licensor") for the Picture Perfect desktop software application, including any associated media and documentation ("Software").
+
+By installing, copying, or otherwise using the Software, you agree to be bound by the terms of this EULA.
+
+1. GRANT OF LICENSE
+- Trial Mode (Unregistered): You may install and evaluate the Software free of charge on any Windows computer, subject to a batch processing limit of up to twenty (20) media files per scan.
+- Picture Perfect Pro Subscription ($99/year): Upon purchasing a valid Pro license key via our Merchant of Record (Lemon Squeezy), you are granted a non-exclusive, non-transferable license to activate and use all Pro features (unlimited batch renaming, paced batch modes, 1-click undo, and CSV reporting) on up to two (2) workstation computers simultaneously.
+
+2. OFFLINE GRACE PERIOD & ACTIVATION
+Pro licenses are validated against the Lemon Squeezy License API and cached locally using Windows Data Protection API (DPAPI). Activated workstations remain fully functional offline for up to seven (7) consecutive days between online heartbeats. You may unlink a workstation seat at any time from within the Software to transfer your seat to another computer.
+
+3. PRIVACY & LOCAL PROCESSING
+Picture Perfect processes your media files (HEIC, JPG, JPEG, PNG, MOV, MP4), EXIF metadata, and SHA-256 content hashes locally on your computer. Your photos and videos are never uploaded to any external server.
+
+4. RESTRICTIONS
+You may not reverse engineer, decompile, disassemble, modify, rent, lease, or redistribute the Software, or circumvent its license validation mechanisms.
+
+5. REFUND POLICY & LIMITED WARRANTY
+Purchases made through Lemon Squeezy are backed by a 30-day money-back guarantee. EXCEPT AS EXPRESSLY STATED, THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THE SOFTWARE.
