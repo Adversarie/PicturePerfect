@@ -41,6 +41,38 @@ ipcMain.handle('license:decrypt', async (_event, base64Cipher) => {
   return null;
 });
 
+ipcMain.handle('license:getAutoProvisionedKey', async () => {
+  // 1. Environment variable override
+  if (process.env.PICTURE_PERFECT_LICENSE_KEY) {
+    const envKey = process.env.PICTURE_PERFECT_LICENSE_KEY.trim();
+    if (envKey) return envKey;
+  }
+
+  // 2. Portable license file search in executable dir, cwd, or userData
+  const candidates = [
+    path.join(path.dirname(process.execPath), 'license.lic'),
+    path.join(path.dirname(process.execPath), 'pictureperfect.lic'),
+    path.join(process.cwd(), 'license.lic'),
+    path.join(process.cwd(), 'pictureperfect.lic'),
+  ];
+  try {
+    const userData = app.getPath('userData');
+    candidates.push(path.join(userData, 'license.lic'));
+    candidates.push(path.join(userData, 'pictureperfect.lic'));
+  } catch {}
+
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) {
+        const content = fs.readFileSync(p, 'utf8').trim();
+        if (content) return content;
+      }
+    } catch {}
+  }
+
+  return null;
+});
+
 ipcMain.handle('open-external', async (_event, url) => {
   if (url && (url.startsWith('https://') || url.startsWith('http://'))) {
     await shell.openExternal(url);
