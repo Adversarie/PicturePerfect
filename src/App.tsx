@@ -1,17 +1,26 @@
 import { useState, useEffect } from 'react';
 import { useFileSystem } from './hooks/useFileSystem';
-import { computePreviews } from './lib/renamer';
 import { licenseClient, LicenseStatus, isDemoKeyAllowed } from './lib/license';
-import { AlertCircle, FileAudio, FileImage, FileVideo, HardDrive, Play, RefreshCw, FolderOpen, Save, Settings2, Trash2, RotateCcw, CheckCircle2, Download, Zap, X, Crown, Lock, ExternalLink, Laptop, ShieldCheck } from 'lucide-react';
+import { AlertCircle, FileImage, FileVideo, HardDrive, Play, RefreshCw, FolderOpen, RotateCcw, CheckCircle2, Download, Zap, X, Crown, Lock, ExternalLink, Laptop, ShieldCheck, Settings2 } from 'lucide-react';
 import { format } from 'date-fns';
 import { cn } from './lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
-import JSZip from 'jszip';
 
 const DEFAULT_TEMPLATE = '{YYYY}-{MM}-{DD}_{HH}-{mm}-{ss}_{Model}';
 
 export default function App() {
-  const { scanDirectory, files, setFiles, isScanning, dirHandle, errorDetails, setErrorDetails, isFallbackMode } = useFileSystem();
+  const {
+    scanDirectory,
+    applyTemplate,
+    executeRename,
+    undoRename,
+    exportAuditCsv,
+    files,
+    isScanning,
+    directoryName,
+    errorDetails,
+    setErrorDetails,
+  } = useFileSystem();
   const [template, setTemplate] = useState(DEFAULT_TEMPLATE);
   const [renameMode, setRenameMode] = useState<'all' | 'batch'>('all');
   const [batchSize, setBatchSize] = useState(10);
@@ -36,82 +45,26 @@ export default function App() {
   // Update previews when template changes or files change
   useEffect(() => {
     if (files.length > 0 && !isProcessing && !isScanning) {
-      setFiles((current) => computePreviews(current, template));
+      applyTemplate(template);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [template, files.length, isScanning]); 
+  }, [template, files.length, isScanning]);
 
   const handleExecuteRename = async () => {
-    if (!dirHandle) return;
+    if (!directoryName) return;
     setIsProcessing(true);
     setProgress(0);
 
-    const pendingFiles = files.filter(f => f.status !== 'success' && f.file.name !== f.newNamePreview && !f.isDuplicate);
-    let limit = renameMode === 'all' ? pendingFiles.length : batchSize;
-    if (!isPro) limit = Math.min(20, limit);
-    
-    const filesToProcess = pendingFiles.slice(0, limit);
-    
-    let completed = 0;
-    const newFiles = [...files];
+    try {
+      const archiveBlob = await executeRename({
+        isPro,
+        mode: renameMode,
+        batchSize,
+        onProgress: pct => setProgress(pct),
+      });
 
-    for (let i = 0; i < filesToProcess.length; i++) {
-      const itemToProcess = filesToProcess[i];
-      const itemIndex = newFiles.findIndex(f => (f.handle ? f.handle.name === itemToProcess.handle?.name : f.originalName === itemToProcess.originalName));
-      if (itemIndex === -1) continue;
-      
-      const item = newFiles[itemIndex];
-
-      if (item.status === 'success' || item.file.name === item.newNamePreview) {
-        completed++;
-        setProgress(Math.round((completed / filesToProcess.length) * 100));
-        continue;
-      }
-
-      try {
-        if (isFallbackMode) {
-          // JSZip logic handled below, just mark success here
-          item.status = 'success';
-        } else if (dirHandle && item.handle) {
-          // Modern File System API rename
-          if ('move' in item.handle && typeof item.handle.move === 'function') {
-            // @ts-ignore - TS dom types are sometimes behind the actual Chromium Support
-            await item.handle.move(item.newNamePreview);
-          } else {
-            // Fallback: Copy via stream & remove old
-            const newFileHandle = await dirHandle.getFileHandle(item.newNamePreview, { create: true });
-            const writable = await newFileHandle.createWritable();
-            const sourceFile = await item.handle.getFile();
-            // Stream piping is highly memory efficient
-            await sourceFile.stream().pipeTo(writable);
-            await dirHandle.removeEntry(item.handle.name);
-            
-            item.handle = newFileHandle; 
-          }
-          item.status = 'success';
-        }
-      } catch (err: any) {
-        console.error(`Error renaming ${item.file.name}:`, err);
-        item.status = 'error';
-        item.errorMessage = err.message || 'Failed';
-      }
-
-      completed++;
-      setProgress(Math.round((completed / filesToProcess.length) * 100));
-      setFiles([...newFiles]); // Re-render progress
-    }
-
-    if (isFallbackMode) {
-      try {
-        const zip = new JSZip();
-        // Add only successfully renamed files to the zip
-        filesToProcess.forEach(f => {
-           if (f.status === 'success') {
-             zip.file(f.newNamePreview, f.file);
-           }
-        });
-        const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
-        const url = URL.createObjectURL(zipBlob);
+      if (archiveBlob) {
+        const url = URL.createObjectURL(archiveBlob);
         const a = document.createElement('a');
         a.href = url;
         a.download = `PicturePerfect_Preview_Renamed_${format(new Date(), 'HHmmss')}.zip`;
@@ -119,94 +72,32 @@ export default function App() {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-      } catch (e) {
-        console.error("ZIP Generation failed:", e);
       }
+    } finally {
+      setIsProcessing(false);
     }
-
-    setIsProcessing(false);
   };
 
   const handleUndo = async () => {
-    if (!dirHandle && !isFallbackMode) return;
+    if (!directoryName) return;
     setIsProcessing(true);
     setProgress(0);
-
-    const successfullyRenamed = files.filter(f => f.status === 'success');
-    let completed = 0;
-    const newFiles = [...files];
-
-    for (let i = 0; i < successfullyRenamed.length; i++) {
-        const itemToProcess = successfullyRenamed[i];
-        const itemIndex = newFiles.findIndex(f => (f.handle ? f.handle.name === itemToProcess.handle?.name : f.originalName === itemToProcess.originalName));
-        if (itemIndex === -1) continue;
-        
-        const item = newFiles[itemIndex];
-
-        try {
-          if (isFallbackMode) {
-            item.status = 'pending';
-            item.newNamePreview = item.originalName;
-          } else if (dirHandle && item.handle) {
-            // Rename back using Modern API
-            if ('move' in item.handle && typeof item.handle.move === 'function') {
-              // @ts-ignore
-              await item.handle.move(item.originalName);
-            } else {
-              // Fallback
-              const newFileHandle = await dirHandle.getFileHandle(item.originalName, { create: true });
-              const writable = await newFileHandle.createWritable();
-              const sourceFile = await item.handle.getFile();
-              await sourceFile.stream().pipeTo(writable);
-              await dirHandle.removeEntry(item.handle.name);
-              
-              item.handle = newFileHandle; 
-            }
-            item.status = 'pending';
-            item.newNamePreview = item.originalName;
-          }
-        } catch (err: any) {
-          console.error(`Error undoing ${item.file.name}:`, err);
-          item.status = 'error';
-          item.errorMessage = 'Undo failed: ' + (err.message || 'Unknown');
-        }
-
-        completed++;
-        setProgress(Math.round((completed / successfullyRenamed.length) * 100));
-        setFiles([...newFiles]);
+    try {
+      await undoRename(pct => setProgress(pct));
+    } finally {
+      setIsProcessing(false);
     }
-
-    // Trigger preview recalculation
-    setFiles((current) => computePreviews(current, template));
-    setIsProcessing(false);
   };
 
   const handleExportCSV = () => {
     if (files.length === 0) return;
-
-    const headers = ["Original Name", "New Name", "Status", "Date Taken", "Location"];
-    const rows = files.map(f => {
-      const dateTaken = f.metadata?.dateTaken ? format(f.metadata.dateTaken, 'yyyy-MM-dd HH:mm:ss') : 'Unknown';
-      const city = f.metadata?.location?.city || 'Unknown';
-      
-      const escapeStr = (str: string) => `"${str.replace(/"/g, '""')}"`;
-      
-      return [
-        escapeStr(f.file.name),
-        escapeStr(f.status === 'success' ? f.newNamePreview : ""),
-        escapeStr(f.status),
-        escapeStr(dateTaken),
-        escapeStr(city)
-      ].join(",");
-    });
-
-    const csvContent = [headers.join(","), ...rows].join("\n");
+    const csvContent = exportAuditCsv();
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
-    
-    const link = document.createElement("a");
+
+    const link = document.createElement('a');
     link.href = url;
-    link.setAttribute("download", `PicturePerfect_Export_${format(new Date(), 'yyyyMMdd_HHmmss')}.csv`);
+    link.setAttribute('download', `PicturePerfect_Export_${format(new Date(), 'yyyyMMdd_HHmmss')}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -247,7 +138,8 @@ export default function App() {
   };
 
   const handleDeactivate = async () => {
-    if (!confirm('Are you sure you want to unlink this workstation? This will release 1 of your 2 device seats on Lemon Squeezy.')) {
+    const merchant = licenseStatus?.merchant_name || licenseClient.getMerchantName();
+    if (!confirm(`Are you sure you want to unlink this workstation? This will release 1 of your 2 device seats on ${merchant}.`)) {
       return;
     }
     setIsValidatingLicense(true);
@@ -313,7 +205,7 @@ export default function App() {
             <div className="mb-8">
                <h2 className="text-xs uppercase tracking-wider text-neutral-500 font-semibold mb-3">1. Source Folder</h2>
                <button 
-                  onClick={scanDirectory}
+                  onClick={() => scanDirectory(template)}
                   disabled={isScanning || isProcessing}
                   className="w-full flex items-center justify-center gap-2 bg-neutral-800 hover:bg-neutral-700 text-sm font-medium py-2.5 px-4 rounded-md transition-colors disabled:opacity-50"
                 >
@@ -322,11 +214,11 @@ export default function App() {
                   ) : (
                     <FolderOpen className="w-4 h-4 text-neutral-400" />
                   )}
-                  {dirHandle ? 'Rescan Directory' : 'Select Directory'}
+                  {directoryName ? 'Rescan Directory' : 'Select Directory'}
                </button>
-               {dirHandle && (
+               {directoryName && (
                  <p className="text-xs text-neutral-500 mt-3 truncate bg-neutral-950 px-3 py-2 rounded border border-neutral-800 font-mono">
-                   /{dirHandle.name}
+                   /{directoryName}
                  </p>
                )}
             </div>
@@ -426,7 +318,7 @@ export default function App() {
          {/* Step 4 Action */}
          <div className="p-6 border-t border-neutral-800 bg-neutral-900">
            {(() => {
-              const pendingCount = files.filter(f => f.status !== 'success' && f.file.name !== f.newNamePreview && !f.isDuplicate).length;
+              const pendingCount = files.filter(f => f.status !== 'success' && f.currentName !== f.newNamePreview && !f.isDuplicate).length;
               const buttonDisabled = pendingCount === 0 || isProcessing || isScanning;
               let amount = renameMode === 'all' ? pendingCount : Math.min(batchSize, pendingCount);
               if (!isPro) amount = Math.min(20, amount);
@@ -586,12 +478,12 @@ export default function App() {
                              initial={{ opacity: 0, y: 5 }} 
                              animate={{ opacity: 1, y: 0 }} 
                              transition={{ delay: Math.min(idx * 0.02, 0.5) }}
-                             key={(item.handle?.name || item.file.name) + idx} 
+                             key={item.originalName + idx} 
                              className="hover:bg-neutral-900/30 transition-colors group"
                             >
                               <td className="py-3 px-8 text-neutral-400 font-mono text-xs flex items-center gap-3">
-                                 {getFileIcon(item.handle?.name || item.file.name, metadata?.isIPhone || false)}
-                                 <span className="truncate max-w-[200px]" title={item.file.name}>{item.file.name}</span>
+                                 {getFileIcon(item.currentName, metadata?.isIPhone || false)}
+                                 <span className="truncate max-w-[200px]" title={item.originalName}>{item.originalName}</span>
                                  {item.isDuplicate && (
                                     <span className="bg-rose-500/20 text-rose-400 border border-rose-500/30 px-1.5 py-0.5 rounded text-[10px] uppercase font-bold tracking-wider ml-2">Duplicate</span>
                                  )}
@@ -631,7 +523,7 @@ export default function App() {
                                    ) : (
                                       <span className={cn(
                                         "truncate max-w-[300px]", 
-                                        item.newNamePreview === item.file.name ? "text-neutral-500" : "text-white"
+                                        item.newNamePreview === item.currentName ? "text-neutral-500" : "text-white"
                                       )}>
                                         {item.newNamePreview}
                                       </span>
@@ -727,7 +619,7 @@ export default function App() {
                             onClick={() => licenseClient.openCustomerPortal()}
                             className="w-full bg-neutral-800 hover:bg-neutral-700 text-white font-medium py-2.5 px-4 rounded-xl transition-colors text-xs flex items-center justify-center gap-2"
                           >
-                            <span>Manage Orders on Lemon Squeezy</span>
+                            <span>Manage Orders on {licenseStatus.merchant_name || licenseClient.getMerchantName()}</span>
                             <ExternalLink className="w-3.5 h-3.5" />
                           </button>
                           <button
@@ -821,7 +713,7 @@ export default function App() {
                            <span>Get Picture Perfect Pro — $99/year</span>
                            <ExternalLink className="w-4 h-4" />
                         </button>
-                        <p className="text-center text-xs text-neutral-500 mt-4">Secured by Lemon Squeezy Merchant of Record. Includes 2 workstation seats with 7-day offline grace.</p>
+                        <p className="text-center text-xs text-neutral-500 mt-4">Secured by {licenseStatus?.merchant_name || licenseClient.getMerchantName()} Merchant of Record. Includes 2 workstation seats with 7-day offline grace.</p>
                      </div>
                    </div>
                  )}

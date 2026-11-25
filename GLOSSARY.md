@@ -20,8 +20,16 @@ _Avoid_: Staging table, mock rename, draft list
 Direct filesystem mutation inside the selected directory that renames each Media File on disk without copying files into a separate archive.
 _Avoid_: Export, save-as, zip download
 
+**Rename Session**:
+A stateful batch workflow over a selected directory of Media Files that coordinates Preview State evaluation, duplicate skipping, cycle-safe In-Place Rename execution, and rollback to original filenames.
+_Avoid_: File hook state, batch queue, file manager
+
+**Merchant of Record**:
+The external commercial platform assuming legal responsibility for payment processing, subscription billing, invoicing, and global tax compliance.
+_Avoid_: Payment gateway, payment processor, billing vendor
+
 **Subscription License**:
-A commercial authorization key issued by the Merchant of Record (Lemon Squeezy) that unlocks unlimited batch renaming beyond the 20-file Trial Mode cap.
+A commercial authorization key (validated online against the Merchant of Record or offline via an owner-signed key) that unlocks unlimited batch renaming beyond the 20-file Trial Mode cap.
 _Avoid_: Serial number, coupon, activation token
 
 **License Vault**:

@@ -20,8 +20,9 @@ export async function extractMetadata(file: File): Promise<ImageMetadata | null>
     // handles File objects smartly by using FileReader reading chunks.
     // However, just to be extremely safe with giant 4K .MOV files, we slice 
     // the first 5MB. EXIF/metadata is typically near the start.
-    const fileSlice = file.slice(0, 5 * 1024 * 1024); 
-    const tags = await ExifReader.load(new File([fileSlice], file.name));
+    const fileSlice = file.slice(0, 5 * 1024 * 1024);
+    const arrayBuffer = await fileSlice.arrayBuffer();
+    const tags = ExifReader.load(arrayBuffer);
 
     const make = tags['Make']?.description || tags['Make']?.value;
     const model = tags['Model']?.description || tags['Model']?.value;

@@ -1,8 +1,20 @@
 /**
- * Zero-Server Commercial Licensing Engine for Picture Perfect
- * Powered by Lemon Squeezy Public License API, Electron safeStorage DPAPI encryption,
- * and Web Crypto HMAC-SHA256 fallback with 7-day sliding offline grace.
+ * Commercial Licensing & License Vault Engine for Picture Perfect.
+ * Owns DPAPI safeStorage encryption, Web Crypto HMAC-SHA256 fallback,
+ * 7-day sliding Offline Grace Period, clock-tamper guard, and Ed25519 PP1 verification,
+ * delegating online Merchant of Record calls across a swappable adapter seam.
  */
+
+import { createMorAdapterFromEnv, MerchantOfRecordAdapter } from './morAdapters';
+
+export type { MerchantOfRecordAdapter } from './morAdapters';
+export {
+  PolarLicenseAdapter,
+  DodoLicenseAdapter,
+  LemonSqueezyLicenseAdapter,
+  MockMorAdapter,
+  createMorAdapterFromEnv,
+} from './morAdapters';
 
 export type LicenseState =
   | 'LICENSED_ONLINE'
@@ -19,8 +31,8 @@ export interface CachedLicenseData {
   instance_name: string;
   customer_email?: string;
   customer_name?: string;
-  product_id?: number;
-  store_id?: number;
+  product_id?: string | number;
+  store_id?: string | number;
   status: string;
   expires_at?: string | null;
   last_validated_at: string;
@@ -41,6 +53,8 @@ export interface LicenseStatus {
   expires_at?: string | null;
   grace_days_left: number;
   checkout_url: string;
+  portal_url: string;
+  merchant_name: string;
 }
 
 export interface EntitlementStatus {
@@ -52,10 +66,9 @@ export interface EntitlementStatus {
   message?: string;
 }
 
-const API_BASE_URL = 'https://api.lemonsqueezy.com/v1/licenses';
 const OFFLINE_GRACE_DAYS = 7;
 const OFFLINE_GRACE_MS = OFFLINE_GRACE_DAYS * 24 * 60 * 60 * 1000;
-const HEARTBEAT_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
+const HEARTBEAT_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
 export function isDemoKeyAllowed(): boolean {
   const viteEnv = (import.meta as any).env || {};
@@ -70,7 +83,6 @@ export function isDemoKeyAllowed(): boolean {
   return false;
 }
 
-// --- Asymmetric Ed25519 Master Offline / Air-Gapped Configuration ---
 export const EMBEDDED_PUBLIC_KEY_HEX = '209850db3e18e6840d4a357cc82562ff0e7f05645d6c7020becd237cf6b6972b';
 
 export function extractPP1Token(rawInput: string): string | null {
@@ -126,34 +138,27 @@ export async function verifyPP1TokenOffline(
     return { valid: false, message: `Invalid signature length (${signatureBytes.length} bytes; expected 64).` };
   }
 
-  // 1. Asymmetric Ed25519 Cryptographic Verification
   try {
     const pubBytes = new Uint8Array(
       publicKeyHex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16))
     );
-
     const subtle = (globalThis as any).crypto?.subtle;
     if (!subtle) {
       return { valid: false, message: 'Web Crypto subtle API is not available in runtime.' };
     }
 
-    const key = await subtle.importKey(
-      'raw',
-      pubBytes,
-      { name: 'Ed25519' },
-      false,
-      ['verify']
-    );
-
+    const key = await subtle.importKey('raw', pubBytes, { name: 'Ed25519' }, false, ['verify']);
     const isValid = await subtle.verify('Ed25519', key, signatureBytes, payloadBytes);
     if (!isValid) {
-      return { valid: false, message: 'Cryptographic signature verification failed (tampered key or invalid signature).' };
+      return {
+        valid: false,
+        message: 'Cryptographic signature verification failed (tampered key or invalid signature).',
+      };
     }
   } catch (err: any) {
     return { valid: false, message: `Ed25519 cryptographic verification error: ${err?.message || err}` };
   }
 
-  // 2. Parse JSON payload
   let payload: any;
   try {
     const text = new TextDecoder().decode(payloadBytes);
@@ -162,25 +167,19 @@ export async function verifyPP1TokenOffline(
     return { valid: false, message: 'Corrupted license payload data.' };
   }
 
-  // 3. Product Integrity Check
   if (payload.product !== 'picture-perfect') {
     return {
       valid: false,
       message: `License was issued for '${payload.product}', not Picture Perfect.`,
-      payload
+      payload,
     };
   }
 
-  // 4. Optional Expiration Check
   if (payload.expires_at) {
     try {
       const expDate = new Date(payload.expires_at).getTime();
       if (Date.now() > expDate) {
-        return {
-          valid: false,
-          message: `License expired on ${payload.expires_at}.`,
-          payload
-        };
+        return { valid: false, message: `License expired on ${payload.expires_at}.`, payload };
       }
     } catch {
       return { valid: false, message: 'Malformed expires_at date in license.', payload };
@@ -190,7 +189,7 @@ export async function verifyPP1TokenOffline(
   return {
     valid: true,
     message: 'Master VIP / Air-Gapped license valid and active.',
-    payload
+    payload,
   };
 }
 
@@ -205,17 +204,14 @@ export async function getAutoProvisionedKey(): Promise<string | null> {
     } catch {}
   }
 
-  if (typeof process !== 'undefined' && process.env) {
-    if (process.env.PICTURE_PERFECT_LICENSE_KEY) {
-      const k = process.env.PICTURE_PERFECT_LICENSE_KEY.trim();
-      if (k) return k;
-    }
+  if (typeof process !== 'undefined' && process.env?.PICTURE_PERFECT_LICENSE_KEY) {
+    const k = process.env.PICTURE_PERFECT_LICENSE_KEY.trim();
+    if (k) return k;
   }
 
   return null;
 }
 
-// --- Electron IPC Helper ---
 function getElectronIpc(): any {
   if (typeof window !== 'undefined') {
     try {
@@ -223,21 +219,18 @@ function getElectronIpc(): any {
         const { ipcRenderer } = (window as any).require('electron');
         return ipcRenderer;
       }
-    } catch {
-      // Running in standard web browser
-    }
+    } catch {}
   }
   return null;
 }
 
-// --- Machine & Browser Fingerprint for HMAC Integrity ---
 function getMachineFingerprint(): string {
   if (typeof window === 'undefined') return 'headless_node_runtime';
   const parts = [
     typeof navigator !== 'undefined' ? navigator.userAgent : '',
     typeof navigator !== 'undefined' ? navigator.language : '',
     typeof screen !== 'undefined' ? `${screen.width}x${screen.height}x${screen.colorDepth}` : '',
-    typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : ''
+    typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : '',
   ];
   return parts.join('|');
 }
@@ -266,7 +259,6 @@ async function computeHmacSha256(keyStr: string, dataStr: string): Promise<strin
   return Math.abs(hash).toString(16);
 }
 
-// --- Encrypted Storage ---
 async function saveEncryptedCache(data: CachedLicenseData): Promise<void> {
   const jsonStr = JSON.stringify(data);
   const ipc = getElectronIpc();
@@ -287,7 +279,6 @@ async function saveEncryptedCache(data: CachedLicenseData): Promise<void> {
     }
   }
 
-  // Web Crypto HMAC fallback
   try {
     const fingerprint = getMachineFingerprint();
     const sig = await computeHmacSha256(fingerprint, jsonStr);
@@ -304,13 +295,10 @@ async function loadEncryptedCache(): Promise<CachedLicenseData | null> {
 
   const ipc = getElectronIpc();
   const secureCipher = localStorage.getItem('pictureperfect_license_vault_secure');
-
   if (secureCipher && ipc) {
     try {
       const decrypted = await ipc.invoke('license:decrypt', secureCipher);
-      if (decrypted) {
-        return JSON.parse(decrypted);
-      }
+      if (decrypted) return JSON.parse(decrypted);
     } catch (e) {
       console.warn('[LicenseClient] Failed to decrypt safeStorage cache:', e);
     }
@@ -324,9 +312,8 @@ async function loadEncryptedCache(): Promise<CachedLicenseData | null> {
       const expectedSig = await computeHmacSha256(fingerprint, envelope.payload);
       if (envelope.sig === expectedSig) {
         return JSON.parse(envelope.payload);
-      } else {
-        console.warn('[LicenseClient] License cache HMAC mismatch! File was tampered with or moved.');
       }
+      console.warn('[LicenseClient] License cache HMAC mismatch! File was tampered with or moved.');
     } catch (e) {
       console.warn('[LicenseClient] Failed to verify web license vault:', e);
     }
@@ -343,32 +330,6 @@ function clearEncryptedCache(): void {
   }
 }
 
-// --- HTTP Communication ---
-async function postLicenseApi(
-  endpoint: 'activate' | 'validate' | 'deactivate',
-  params: Record<string, string>
-): Promise<{ status: number; data: any }> {
-  const url = `${API_BASE_URL}/${endpoint}`;
-  const formBody = Object.keys(params)
-    .map(key => encodeURIComponent(key) + '=' + encodeURIComponent(params[key]))
-    .join('&');
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: formBody,
-    });
-    const data = await response.json().catch(() => ({}));
-    return { status: response.status, data };
-  } catch (err: any) {
-    return { status: 0, data: { network_error: err?.message || 'Network unreachable' } };
-  }
-}
-
 function evaluateOfflineGrace(cached: CachedLicenseData): { state: LicenseState; graceDaysLeft: number } {
   const now = Date.now();
   if (now < cached.last_observed_timestamp - 3600000) {
@@ -382,26 +343,28 @@ function evaluateOfflineGrace(cached: CachedLicenseData): { state: LicenseState;
   if (remainingMs > 0) {
     const daysLeft = Math.max(0, Math.round((remainingMs / (24 * 60 * 60 * 1000)) * 10) / 10);
     return { state: 'LICENSED_OFFLINE_GRACE', graceDaysLeft: daysLeft };
-  } else {
-    return { state: 'GRACE_EXPIRED', graceDaysLeft: 0 };
   }
+  return { state: 'GRACE_EXPIRED', graceDaysLeft: 0 };
 }
 
-// --- LicenseClient ---
+export interface LicenseClientOptions {
+  adapter?: MerchantOfRecordAdapter;
+  publicKeyHex?: string;
+}
+
 export class LicenseClient {
   public state: LicenseState = 'UNLICENSED';
   public cachedLicense: CachedLicenseData | null = null;
-  private expectedStoreId: number;
-  private expectedProductId: number;
+  private readonly adapter: MerchantOfRecordAdapter;
+  private readonly publicKeyHex: string;
   private heartbeatTimer: any = null;
-  private initialized: boolean = false;
+  private initialized = false;
   private initPromise: Promise<void> | null = null;
 
-  constructor() {
+  constructor(options: LicenseClientOptions = {}) {
     const env = (import.meta as any).env || {};
-    this.expectedStoreId = Number(env.VITE_LEMON_SQUEEZY_STORE_ID) || 0;
-    this.expectedProductId = Number(env.VITE_LEMON_SQUEEZY_PRODUCT_ID) || 0;
-    this.init();
+    this.adapter = options.adapter || createMorAdapterFromEnv(env);
+    this.publicKeyHex = options.publicKeyHex || EMBEDDED_PUBLIC_KEY_HEX;
   }
 
   public async init(): Promise<void> {
@@ -421,15 +384,10 @@ export class LicenseClient {
             this.state = 'UNLICENSED';
           }
         } else if (this.cachedLicense.offline_permanent || this.cachedLicense.license_key.startsWith('PP1.')) {
-          const verifyRes = await verifyPP1TokenOffline(this.cachedLicense.license_key);
-          if (verifyRes.valid) {
-            this.state = 'LICENSED_ONLINE';
-          } else {
-            this.state = 'EXPIRED';
-          }
+          const verifyRes = await verifyPP1TokenOffline(this.cachedLicense.license_key, this.publicKeyHex);
+          this.state = verifyRes.valid ? 'LICENSED_ONLINE' : 'EXPIRED';
         } else {
-          const grace = evaluateOfflineGrace(this.cachedLicense);
-          this.state = grace.state;
+          this.state = evaluateOfflineGrace(this.cachedLicense).state;
         }
         if (this.cachedLicense && this.isAuthorized()) {
           this.startBackgroundHeartbeat();
@@ -440,19 +398,13 @@ export class LicenseClient {
 
       this.initialized = true;
 
-      // Zero-Touch Auto Provisioning check if not authorized
       if (!this.isAuthorized()) {
         try {
           const autoKey = await getAutoProvisionedKey();
           if (autoKey) {
-            const actRes = await this.activate(autoKey);
-            if (actRes.success) {
-              console.log('[LicenseClient] Zero-touch auto-provisioned key activated successfully.');
-            }
+            await this.activate(autoKey);
           }
-        } catch (err) {
-          // Auto-provisioning skipped or failed
-        }
+        } catch {}
       }
     })();
 
@@ -460,8 +412,15 @@ export class LicenseClient {
   }
 
   public getCheckoutUrl(): string {
-    const env = (import.meta as any).env || {};
-    return env.VITE_LEMON_SQUEEZY_CHECKOUT_URL || 'https://lemonsqueezy.com';
+    return this.adapter.checkoutUrl;
+  }
+
+  public getPortalUrl(): string {
+    return this.adapter.portalUrl;
+  }
+
+  public getMerchantName(): string {
+    return this.adapter.merchantName;
   }
 
   public isAuthorized(): boolean {
@@ -480,21 +439,24 @@ export class LicenseClient {
       graceDays = evaluateOfflineGrace(this.cachedLicense).graceDaysLeft;
     }
 
-    const defaultPlan = (this.cachedLicense?.offline_permanent || key.startsWith('PP1.'))
-      ? 'Pro Subscriber (Air-Gapped Master)'
-      : 'Pro Subscriber';
+    const defaultPlan =
+      this.cachedLicense?.offline_permanent || key.startsWith('PP1.')
+        ? 'Pro Subscriber (Air-Gapped Master)'
+        : 'Pro Subscriber';
 
     return {
       valid: isAuth,
       state: this.state,
-      status: isAuth ? 'active' : (this.state === 'UNLICENSED' ? 'trial' : 'expired'),
-      plan: isAuth ? (this.cachedLicense?.plan || defaultPlan) : 'Trial Mode',
+      status: isAuth ? 'active' : this.state === 'UNLICENSED' ? 'trial' : 'expired',
+      plan: isAuth ? this.cachedLicense?.plan || defaultPlan : 'Trial Mode',
       key_masked: maskedKey,
       instance_id: this.cachedLicense?.instance_id || null,
       customer_email: this.cachedLicense?.customer_email || null,
       expires_at: this.cachedLicense?.expires_at || null,
       grace_days_left: graceDays,
-      checkout_url: this.getCheckoutUrl(),
+      checkout_url: this.adapter.checkoutUrl,
+      portal_url: this.adapter.portalUrl,
+      merchant_name: this.adapter.merchantName,
     };
   }
 
@@ -510,7 +472,6 @@ export class LicenseClient {
       return { success: false, message: 'License key cannot be empty.', status: this.getStatus() };
     }
 
-    // Developer demo bypass (restricted to development/test environments)
     if (cleanKey === 'DEMO-KEY-123') {
       if (!isDemoKeyAllowed()) {
         return {
@@ -525,8 +486,8 @@ export class LicenseClient {
         instance_name: instanceName || 'Demo-Studio-Workstation',
         customer_email: 'demo@pictureperfect.click',
         customer_name: 'Demo Photographer',
-        product_id: this.expectedProductId || 45200,
-        store_id: this.expectedStoreId || 81234,
+        product_id: 'demo',
+        store_id: 'demo',
         status: 'active',
         expires_at: '2099-01-01T00:00:00Z',
         last_validated_at: new Date().toISOString(),
@@ -538,16 +499,11 @@ export class LicenseClient {
       return { success: true, message: 'Demo license activated successfully!', status: this.getStatus() };
     }
 
-    // Offline/Air-Gapped Ed25519 PP1 Master Key bypass (zero network calls)
     const pp1Token = extractPP1Token(cleanKey);
     if (pp1Token) {
-      const pp1Res = await verifyPP1TokenOffline(pp1Token);
+      const pp1Res = await verifyPP1TokenOffline(pp1Token, this.publicKeyHex);
       if (!pp1Res.valid) {
-        return {
-          success: false,
-          message: pp1Res.message,
-          status: this.getStatus(),
-        };
+        return { success: false, message: pp1Res.message, status: this.getStatus() };
       }
 
       const p = pp1Res.payload || {};
@@ -557,8 +513,8 @@ export class LicenseClient {
         instance_name: instanceName || 'Air-Gapped-Workstation',
         customer_email: p.customer_email || 'owner@pictureperfect.click',
         customer_name: p.customer_name || 'VIP Master Licensee',
-        product_id: this.expectedProductId || 45200,
-        store_id: this.expectedStoreId || 81234,
+        product_id: 'picture-perfect',
+        store_id: 'offline-ed25519',
         status: 'active',
         expires_at: p.expires_at || null,
         last_validated_at: new Date().toISOString(),
@@ -584,54 +540,32 @@ export class LicenseClient {
         ? `PicturePerfect-${navigator.platform || 'Workstation'}`
         : 'PicturePerfect-Workstation');
 
-    const { status, data } = await postLicenseApi('activate', {
-      license_key: cleanKey,
-      instance_name: instName,
-    });
-
-    if (status === 0) {
+    const res = await this.adapter.activate(cleanKey, instName);
+    if (res.networkError) {
       return {
         success: false,
-        message: `Network error: ${data.network_error || 'Could not connect to activation server.'}`,
+        message: `Network error: ${res.networkError}`,
         status: this.getStatus(),
       };
     }
-
-    if (!data.activated) {
-      const err = data.error || 'License activation failed.';
-      return { success: false, message: err, status: this.getStatus() };
-    }
-
-    // Cross-product check
-    const meta = data.meta || {};
-    if (this.expectedProductId && meta.product_id && meta.product_id !== this.expectedProductId) {
+    if (!res.activated) {
       return {
         success: false,
-        message: 'This license key is valid for a different product, not Picture Perfect.',
+        message: res.error || 'License activation failed.',
         status: this.getStatus(),
       };
     }
-    if (this.expectedStoreId && meta.store_id && meta.store_id !== this.expectedStoreId) {
-      return {
-        success: false,
-        message: 'This license key belongs to a different store.',
-        status: this.getStatus(),
-      };
-    }
-
-    const licObj = data.license_key || {};
-    const instObj = data.instance || {};
 
     const cached: CachedLicenseData = {
-      license_key: licObj.key || cleanKey,
-      instance_id: instObj.id || 'inst_' + Math.random().toString(36).substring(2, 10),
-      instance_name: instObj.name || instName,
-      customer_email: meta.customer_email,
-      customer_name: meta.customer_name,
-      product_id: meta.product_id,
-      store_id: meta.store_id,
-      status: licObj.status || 'active',
-      expires_at: licObj.expires_at || null,
+      license_key: res.licenseKey || cleanKey,
+      instance_id: res.instanceId || 'inst_' + Math.random().toString(36).substring(2, 10),
+      instance_name: res.instanceName || instName,
+      customer_email: res.customerEmail,
+      customer_name: res.customerName,
+      product_id: res.productId,
+      store_id: res.storeId,
+      status: res.status || 'active',
+      expires_at: res.expiresAt || null,
       last_validated_at: new Date().toISOString(),
       last_observed_timestamp: Date.now(),
     };
@@ -662,19 +596,17 @@ export class LicenseClient {
       return this.getStatus();
     }
 
-    // Offline / Air-Gapped Ed25519 PP1 verification (zero network requests, immune to grace expiry)
     if (this.cachedLicense.offline_permanent || this.cachedLicense.license_key.startsWith('PP1.')) {
-      const pp1Res = await verifyPP1TokenOffline(this.cachedLicense.license_key);
+      const pp1Res = await verifyPP1TokenOffline(this.cachedLicense.license_key, this.publicKeyHex);
       if (pp1Res.valid) {
         this.state = 'LICENSED_ONLINE';
         this.cachedLicense.last_validated_at = new Date().toISOString();
         this.cachedLicense.last_observed_timestamp = Date.now();
         await saveEncryptedCache(this.cachedLicense);
         return this.getStatus();
-      } else {
-        this.state = 'EXPIRED';
-        return this.getStatus();
       }
+      this.state = 'EXPIRED';
+      return this.getStatus();
     }
 
     const currentNow = Date.now();
@@ -687,50 +619,37 @@ export class LicenseClient {
       currentNow
     );
 
-    const params: Record<string, string> = {
-      license_key: this.cachedLicense.license_key,
-    };
-    if (this.cachedLicense.instance_id) {
-      params.instance_id = this.cachedLicense.instance_id;
-    }
-
-    const { status, data } = await postLicenseApi('validate', params);
-
-    // Offline resilience
-    if (status === 0) {
-      const grace = evaluateOfflineGrace(this.cachedLicense);
-      this.state = grace.state;
+    const res = await this.adapter.validate(this.cachedLicense.license_key, this.cachedLicense.instance_id);
+    if (res.networkError) {
+      this.state = evaluateOfflineGrace(this.cachedLicense).state;
       return this.getStatus();
     }
 
-    if (status === 404) {
+    if (res.notFound) {
       clearEncryptedCache();
       this.cachedLicense = null;
       this.state = 'UNLICENSED';
       return this.getStatus();
     }
 
-    if (data.valid === true) {
-      const licObj = data.license_key || {};
-      this.cachedLicense.status = licObj.status || 'active';
-      this.cachedLicense.expires_at = licObj.expires_at || null;
+    if (res.valid) {
+      this.cachedLicense.status = 'active';
+      if (res.expiresAt !== undefined) {
+        this.cachedLicense.expires_at = res.expiresAt;
+      }
       this.cachedLicense.last_validated_at = new Date().toISOString();
       await saveEncryptedCache(this.cachedLicense);
       this.state = 'LICENSED_ONLINE';
       return this.getStatus();
     }
 
-    const licStatus = data.license_key?.status || '';
-    const errorMsg = data.error || '';
-
-    if (licStatus === 'disabled' || errorMsg.includes('disabled')) {
+    if (res.status === 'disabled') {
       this.state = 'DISABLED';
-    } else if (licStatus === 'expired' || errorMsg.includes('expired')) {
+    } else if (res.status === 'expired') {
       this.state = 'EXPIRED';
     } else {
       this.state = 'UNLICENSED';
     }
-
     return this.getStatus();
   }
 
@@ -741,14 +660,9 @@ export class LicenseClient {
       return { success: true, message: 'No active license to deactivate.', status: this.getStatus() };
     }
 
-    const { license_key, instance_id } = this.cachedLicense;
-    if (
-      instance_id &&
-      license_key !== 'DEMO-KEY-123' &&
-      !license_key.startsWith('PP1.') &&
-      !this.cachedLicense.offline_permanent
-    ) {
-      await postLicenseApi('deactivate', { license_key, instance_id });
+    const { license_key, instance_id, offline_permanent } = this.cachedLicense;
+    if (instance_id && license_key !== 'DEMO-KEY-123' && !license_key.startsWith('PP1.') && !offline_permanent) {
+      await this.adapter.deactivate(license_key, instance_id);
     }
 
     clearEncryptedCache();
@@ -764,7 +678,7 @@ export class LicenseClient {
   }
 
   public startCheckout(_tier?: string): void {
-    const url = this.getCheckoutUrl();
+    const url = this.adapter.checkoutUrl;
     const ipc = getElectronIpc();
     if (ipc) {
       ipc.invoke('open-external', url).catch(() => {
@@ -776,7 +690,7 @@ export class LicenseClient {
   }
 
   public openCustomerPortal(): void {
-    const portalUrl = 'https://app.lemonsqueezy.com/my-orders';
+    const portalUrl = this.adapter.portalUrl;
     const ipc = getElectronIpc();
     if (ipc) {
       ipc.invoke('open-external', portalUrl).catch(() => {
@@ -807,14 +721,9 @@ export class LicenseClient {
   }
 }
 
-// Global Singleton Export
 export const licenseClient = new LicenseClient();
 
-// --- Backwards Compatibility Wrappers for Existing Codebase ---
-
-export async function validateSubscriptionEntitlement(
-  identifier?: string
-): Promise<EntitlementStatus> {
+export async function validateSubscriptionEntitlement(identifier?: string): Promise<EntitlementStatus> {
   const clean = identifier?.trim();
   if (clean) {
     const res = await licenseClient.activate(clean);
